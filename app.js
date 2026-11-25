@@ -542,3 +542,8 @@ function escapeHtml(str) {
 function escapeJs(str) {
   return String(str).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw-cobros.js").catch(() => {});
+  });
+}
