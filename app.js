@@ -13,14 +13,23 @@ import {
 // =========================================================================
 // 1. PEGA AQUÍ LA CONFIGURACIÓN DE TU PROYECTO DE FIREBASE
 // =========================================================================
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "TU_API_KEY",
-  authDomain: "TU_PROJECT_ID.firebaseapp.com",
-  projectId: "TU_PROJECT_ID",
-  storageBucket: "TU_PROJECT_ID.appspot.com",
-  messagingSenderId: "TU_SENDER_ID",
-  appId: "TU_APP_ID"
+  apiKey: "AIzaSyAtFPX1nB7dLgbQWAHBnqv3N2-hL5eWHgo",
+  authDomain: "gestor-pro-venezuela.firebaseapp.com",
+  projectId: "gestor-pro-venezuela",
+  storageBucket: "gestor-pro-venezuela.firebasestorage.app",
+  messagingSenderId: "767203590243",
+  appId: "1:767203590243:web:dffac7819a1101ae733856"
 };
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
