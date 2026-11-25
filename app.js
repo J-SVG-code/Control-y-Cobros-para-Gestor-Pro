@@ -1,5 +1,11 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
+  getAuth,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
   getFirestore,
   collection,
   doc,
@@ -11,11 +17,10 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // =========================================================================
-// 1. PEGA AQUÍ LA CONFIGURACIÓN DE TU PROYECTO DE FIREBASE
+// 1. CONFIGURACIÓN DE TU PROYECTO DE FIREBASE
 // =========================================================================
-// Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyAtFPX1nB7dLgbQWAHBnqv3N2-hL5eWHgo",
+  apiKey: "AIzaSyAtFXiNb7dLgb2KAfDmqV3NZ-nLSewNgo",
   authDomain: "gestor-pro-venezuela.firebaseapp.com",
   projectId: "gestor-pro-venezuela",
   storageBucket: "gestor-pro-venezuela.firebasestorage.app",
@@ -23,9 +28,8 @@ const firebaseConfig = {
   appId: "1:767203590243:web:dffac7819a1101ae733856"
 };
 
-// Initialize Firebase
-
 const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
 const db = getFirestore(app);
 
 // Colecciones en Firestore
@@ -35,9 +39,16 @@ const PAYMENTS_COL = "payment_references";
 // Estado en memoria
 let storesCache = [];
 let refsCache = [];
+let unsubStores = null;
+let unsubRefs = null;
+let initialCheckDone = false;
 
 // Elementos del DOM
 const dbStatus = document.getElementById("dbStatus");
+const loginSection = document.getElementById("loginSection");
+const panelSection = document.getElementById("panelSection");
+const btnLogout = document.getElementById("btnLogout");
+const btnRunAutoCheck = document.getElementById("btnRunAutoCheck");
 const storesTableBody = document.getElementById("storesTableBody");
 const refsTableBody = document.getElementById("refsTableBody");
 const searchInput = document.getElementById("searchInput");
@@ -48,7 +59,53 @@ document.getElementById("regDate").value = todayISO;
 document.getElementById("payDate").value = todayISO;
 
 // =========================================================================
-// UTILIDADES DE FECHA (Cobro mensual el mismo día de ingreso)
+// AUTENTICACIÓN DE ADMINISTRADOR
+// =========================================================================
+document.getElementById("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const feedback = document.getElementById("loginFeedback");
+  feedback.className = "feedback";
+
+  const email = document.getElementById("loginEmail").value.trim();
+  const password = document.getElementById("loginPassword").value;
+
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+    feedback.textContent = "";
+  } catch (err) {
+    console.error(err);
+    feedback.textContent = `No se pudo iniciar sesión: ${err.message}`;
+    feedback.classList.add("err");
+  }
+});
+
+btnLogout.addEventListener("click", async () => {
+  await signOut(auth);
+});
+
+onAuthStateChanged(auth, (user) => {
+  if (unsubStores) { unsubStores(); unsubStores = null; }
+  if (unsubRefs) { unsubRefs(); unsubRefs = null; }
+  initialCheckDone = false;
+
+  if (user) {
+    loginSection.style.display = "none";
+    panelSection.style.display = "flex";
+    btnLogout.style.display = "inline-block";
+    btnRunAutoCheck.style.display = "inline-block";
+    startRealtimeListeners();
+  } else {
+    loginSection.style.display = "block";
+    panelSection.style.display = "none";
+    btnLogout.style.display = "none";
+    btnRunAutoCheck.style.display = "none";
+    dbStatus.textContent = "Inicia sesión";
+    dbStatus.className = "badge badge-warn";
+  }
+});
+
+// =========================================================================
+// UTILIDADES DE FECHA (Cobro el mismo día de ingreso cada 1 o 3 meses)
 // =========================================================================
 function toISODate(dateObj) {
   const y = dateObj.getFullYear();
@@ -66,14 +123,9 @@ function daysInMonth(year, monthIndexZeroBased) {
   return new Date(year, monthIndexZeroBased + 1, 0).getDate();
 }
 
-/**
- * Calcula el mismo día `billingDay` en el mes siguiente a partir de `baseDate`.
- * Si `baseDate` es el día en curso o anterior en su mes, avanza al mes siguiente
- * manteniendo `billingDay` (o el último día del mes si el mes es más corto, ej. 30/31 en Feb).
- */
-function getNextBillingDate(baseDate, billingDay) {
+function addMonthsKeepingBillingDay(baseDate, billingDay, monthsToAdd = 1) {
   let targetYear = baseDate.getFullYear();
-  let targetMonth = baseDate.getMonth() + 1;
+  let targetMonth = baseDate.getMonth() + monthsToAdd;
   if (targetMonth > 11) {
     targetYear += Math.floor(targetMonth / 12);
     targetMonth = targetMonth % 12;
@@ -84,7 +136,7 @@ function getNextBillingDate(baseDate, billingDay) {
 }
 
 // =========================================================================
-// 2. REGISTRAR NUEVO NEGOCIO (1er MES GRATIS)
+// REGISTRAR NUEVO NEGOCIO (1er MES GRATIS)
 // =========================================================================
 document.getElementById("registerStoreForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -97,7 +149,7 @@ document.getElementById("registerStoreForm").addEventListener("submit", async (e
   const ingresoDate = parseISODate(document.getElementById("regDate").value);
 
   const billingDay = ingresoDate.getDate();
-  const nextDueDate = getNextBillingDate(ingresoDate, billingDay);
+  const nextDueDate = addMonthsKeepingBillingDay(ingresoDate, billingDay, 1);
   const nextDueISO = toISODate(nextDueDate);
 
   try {
@@ -117,15 +169,15 @@ document.getElementById("registerStoreForm").addEventListener("submit", async (e
       fechaIngreso: toISODate(ingresoDate),
       diaCobro: billingDay,
       primerMesGratis: true,
-      trialEndsAt: nextDueISO,
+      trialEndsAt: nextDueDate.getTime(),
       proximoVencimiento: nextDueISO,
-      paidUntil: nextDueISO,
+      paidUntil: nextDueDate.getTime(),
       status: "trial",
       suspended: false,
       inhabilitada: false,
       activa: true,
       suspensionReason: "",
-      createdAt: serverTimestamp(),
+      createdAt: Date.now(),
       updatedAt: serverTimestamp()
     });
 
@@ -141,7 +193,7 @@ document.getElementById("registerStoreForm").addEventListener("submit", async (e
 });
 
 // =========================================================================
-// 3. APLICAR PAGO POR ID + REFERENCIA (SIN DUPLICADOS)
+// APLICAR PAGO POR ID + REFERENCIA (PLAN 1 O 3 MESES, SIN DUPLICADOS)
 // =========================================================================
 document.getElementById("applyPaymentForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -150,11 +202,11 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
 
   const storeId = document.getElementById("payStoreId").value.trim();
   const reference = document.getElementById("payRef").value.trim().toUpperCase();
+  const months = Number(document.getElementById("payMonths").value) === 3 ? 3 : 1;
   const amount = document.getElementById("payAmount").value.trim() || "No especificado";
   const payDateStr = document.getElementById("payDate").value;
 
   try {
-    // 1. Verificar si la referencia ya fue usada
     const refDocRef = doc(db, PAYMENTS_COL, reference);
     const refSnap = await getDoc(refDocRef);
     if (refSnap.exists()) {
@@ -164,7 +216,6 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
       return;
     }
 
-    // 2. Verificar que el negocio exista
     const storeRef = doc(db, STORES_COL, storeId);
     const storeSnap = await getDoc(storeRef);
     if (!storeSnap.exists()) {
@@ -178,23 +229,21 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
     const currentDue = storeData.proximoVencimiento ? parseISODate(storeData.proximoVencimiento) : parseISODate(payDateStr);
     const paymentDateObj = parseISODate(payDateStr);
 
-    // Base para calcular el siguiente mes: si aún no vence o si ya venció, avanzamos 1 ciclo desde la fecha de cobro/pago
     const baseForNext = currentDue > paymentDateObj ? currentDue : paymentDateObj;
-    const nextDueDate = getNextBillingDate(baseForNext, billingDay);
+    const nextDueDate = addMonthsKeepingBillingDay(baseForNext, billingDay, months);
     const nextDueISO = toISODate(nextDueDate);
 
-    // 3. Guardar referencia usada para impedir duplicados
     await setDoc(refDocRef, {
       reference,
       storeId,
       ownerEmail: storeData.ownerEmail || "",
+      planMonths: months,
       amount,
       fechaPago: payDateStr,
       nuevoVencimiento: nextDueISO,
       createdAt: serverTimestamp()
     });
 
-    // 4. Activar negocio y actualizar vencimiento en Firestore
     await updateDoc(storeRef, {
       status: "active",
       suspended: false,
@@ -203,14 +252,17 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
       suspensionReason: "",
       lastPaymentRef: reference,
       lastPaymentDate: payDateStr,
-      paidUntil: nextDueISO,
+      lastPlanMonths: months,
+      paidUntil: nextDueDate.getTime(),
       proximoVencimiento: nextDueISO,
       updatedAt: serverTimestamp()
     });
 
-    feedback.textContent = `Pago validado (Ref: ${reference}). "${storeId}" ACTIVO hasta ${nextDueISO}.`;
+    const planLabel = months === 3 ? "3 meses" : "1 mes";
+    feedback.textContent = `Pago validado (${planLabel}, Ref: ${reference}). "${storeId}" ACTIVO hasta ${nextDueISO}.`;
     feedback.classList.add("ok");
     e.target.reset();
+    document.getElementById("payMonths").value = "1";
     document.getElementById("payDate").value = todayISO;
   } catch (err) {
     console.error(err);
@@ -220,7 +272,7 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
 });
 
 // =========================================================================
-// 4. BLOQUEO AUTOMÁTICO EN FIREBASE CUANDO LLEGA SU DÍA SIN PAGO
+// BLOQUEO AUTOMÁTICO EN FIREBASE CUANDO LLEGA SU DÍA SIN PAGO
 // =========================================================================
 async function runAutomaticExpirationCheck() {
   const todayStr = toISODate(new Date());
@@ -231,7 +283,6 @@ async function runAutomaticExpirationCheck() {
     if (!store.proximoVencimiento) continue;
     const dueObj = parseISODate(store.proximoVencimiento);
 
-    // Si hoy es igual o posterior al día de cobro/vencimiento y no está suspendido aún, lo bloquea
     const isDueTodayOrPast = todayObj >= dueObj;
     const alreadyBlocked = store.inhabilitada === true || store.suspended === true || store.status === "suspended";
 
@@ -251,14 +302,13 @@ async function runAutomaticExpirationCheck() {
   return blockedCount;
 }
 
-document.getElementById("btnRunAutoCheck").addEventListener("click", async () => {
+btnRunAutoCheck.addEventListener("click", async () => {
   const count = await runAutomaticExpirationCheck();
   alert(count > 0
     ? `Revisión completada: se bloquearon ${count} negocio(s) vencido(s) en Firebase.`
     : "Revisión completada: no hay negocios vencidos pendientes por bloquear.");
 });
 
-// Acciones manuales rápidas por fila (bloquear o reactivar manualmente si lo necesitas)
 window.toggleStoreBlock = async function (storeId, shouldBlock) {
   const storeRef = doc(db, STORES_COL, storeId);
   if (shouldBlock) {
@@ -273,7 +323,8 @@ window.toggleStoreBlock = async function (storeId, shouldBlock) {
   } else {
     const store = storesCache.find((s) => s.storeId === storeId);
     const billingDay = store?.diaCobro || new Date().getDate();
-    const nextDueISO = toISODate(getNextBillingDate(new Date(), billingDay));
+    const nextDueDate = addMonthsKeepingBillingDay(new Date(), billingDay, 1);
+    const nextDueISO = toISODate(nextDueDate);
     await updateDoc(storeRef, {
       status: "active",
       suspended: false,
@@ -281,41 +332,40 @@ window.toggleStoreBlock = async function (storeId, shouldBlock) {
       activa: true,
       suspensionReason: "",
       proximoVencimiento: nextDueISO,
-      paidUntil: nextDueISO,
+      paidUntil: nextDueDate.getTime(),
       updatedAt: serverTimestamp()
     });
   }
 };
 
 // =========================================================================
-// 5. ESCUCHA EN TIEMPO REAL DESDE FIRESTORE + RENDERIZADO
+// ESCUCHA EN TIEMPO REAL DESDE FIRESTORE
 // =========================================================================
-let initialCheckDone = false;
+function startRealtimeListeners() {
+  unsubStores = onSnapshot(collection(db, STORES_COL), async (snap) => {
+    dbStatus.textContent = "Conectado a Firebase";
+    dbStatus.className = "badge badge-ok";
 
-onSnapshot(collection(db, STORES_COL), async (snap) => {
-  dbStatus.textContent = "Conectado a Firebase";
-  dbStatus.className = "badge badge-ok";
+    storesCache = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  storesCache = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (!initialCheckDone) {
+      initialCheckDone = true;
+      await runAutomaticExpirationCheck();
+    }
 
-  // Ejecuta revisión automática al cargar los negocios por primera vez
-  if (!initialCheckDone) {
-    initialCheckDone = true;
-    await runAutomaticExpirationCheck();
-  }
+    renderStatsAndTables();
+  }, (err) => {
+    console.error(err);
+    dbStatus.textContent = "Error de conexión";
+    dbStatus.className = "badge badge-bad";
+  });
 
-  renderStatsAndTables();
-}, (err) => {
-  console.error(err);
-  dbStatus.textContent = "Error de conexión";
-  dbStatus.className = "badge badge-bad";
-});
-
-onSnapshot(collection(db, PAYMENTS_COL), (snap) => {
-  refsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  document.getElementById("statRefs").textContent = refsCache.length;
-  renderRefsTable();
-});
+  unsubRefs = onSnapshot(collection(db, PAYMENTS_COL), (snap) => {
+    refsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    document.getElementById("statRefs").textContent = refsCache.length;
+    renderRefsTable();
+  });
+}
 
 searchInput.addEventListener("input", renderStatsAndTables);
 
@@ -371,15 +421,19 @@ function renderRefsTable() {
     return;
   }
 
-  refsTableBody.innerHTML = refsCache.map((r) => `
-    <tr>
-      <td><strong>${escapeHtml(r.reference || r.id)}</strong></td>
-      <td>${escapeHtml(r.storeId || "-")}</td>
-      <td>${escapeHtml(r.amount || "-")}</td>
-      <td>${escapeHtml(r.fechaPago || "-")}</td>
-      <td>${escapeHtml(r.nuevoVencimiento ? `Vence ${r.nuevoVencimiento}` : "Registrada")}</td>
-    </tr>
-  `).join("");
+  refsTableBody.innerHTML = refsCache.map((r) => {
+    const planText = r.planMonths === 3 ? "3 meses" : (r.planMonths === 1 ? "1 mes" : "");
+    const amountDisplay = planText ? `${planText} · ${r.amount || ""}` : (r.amount || "-");
+    return `
+      <tr>
+        <td><strong>${escapeHtml(r.reference || r.id)}</strong></td>
+        <td>${escapeHtml(r.storeId || "-")}</td>
+        <td>${escapeHtml(amountDisplay)}</td>
+        <td>${escapeHtml(r.fechaPago || "-")}</td>
+        <td>${escapeHtml(r.nuevoVencimiento ? `Vence ${r.nuevoVencimiento}` : "Registrada")}</td>
+      </tr>
+    `;
+  }).join("");
 }
 
 function escapeHtml(str) {
