@@ -348,7 +348,7 @@ async function runAutomaticExpirationCheck() {
     const alreadyBlocked = isStoreBlocked(store);
 
     if (isDueTodayOrPast && !alreadyBlocked) {
-      const storeRef = doc(db, STORES_COL, store.storeId || store.id);
+      const storeRef = doc(db, STORES_COL, store.id);
       await updateDoc(storeRef, {
         status: "suspended",
         suspended: true,
@@ -372,13 +372,15 @@ btnRunAutoCheck.addEventListener("click", async () => {
 
 window.toggleStoreBlock = async function (storeId, shouldBlock) {
   const docId = String(storeId);
-  const store = storesCache.find((s) => (s.storeId || s.id) === docId);
+  const store = storesCache.find((s) => s.id === docId || s.storeId === docId);
+  const targetDocId = store?.id || docId;
+
   if (shouldBlock && store && isExemptStore(store)) {
     alert("Este correo está configurado como exento y no puede bloquearse.");
     return;
   }
 
-  const storeRef = doc(db, STORES_COL, docId);
+  const storeRef = doc(db, STORES_COL, targetDocId);
   try {
     if (shouldBlock) {
       await updateDoc(storeRef, {
@@ -406,7 +408,8 @@ window.toggleStoreBlock = async function (storeId, shouldBlock) {
     }
   } catch (err) {
     console.error(err);
-    alert(`Error al actualizar estado: ${err.message}`);
+    const currentUid = auth.currentUser ? auth.currentUser.uid : "sin-usuario";
+    alert(`Error (${currentUid} -> ${targetDocId}): ${err.message}`);
   }
 };
 
@@ -454,6 +457,7 @@ function renderStatsAndTables() {
   const filtered = storesCache.filter((s) => {
     const bizLabel = getStoreName(s).toLowerCase();
     return (
+      (s.id || "").toLowerCase().includes(query) ||
       (s.storeId || "").toLowerCase().includes(query) ||
       (s.ownerEmail || "").toLowerCase().includes(query) ||
       bizLabel.includes(query)
@@ -466,7 +470,7 @@ function renderStatsAndTables() {
   }
 
   storesTableBody.innerHTML = filtered.map((s) => {
-    const docId = s.storeId || s.id;
+    const docId = s.id;
     const exempt = isExemptStore(s);
     const blocked = isStoreBlocked(s);
     const isTrial = !blocked && !exempt && s.status === "trial";
