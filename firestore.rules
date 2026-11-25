@@ -1,0 +1,139 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDocPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function hasUserDoc(uid) {
+      return exists(userDocPath(uid));
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.admin == true ||
+        (hasUserDoc(request.auth.uid) && get(userDocPath(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isOwnerOfStoreData(data) {
+      return isSignedIn() && data.ownerUid == request.auth.uid;
+    }
+
+    function isMemberOfStoreData(data) {
+      return isSignedIn() && (
+        data.ownerUid == request.auth.uid ||
+        (('memberUids' in data) && (request.auth.uid in data.memberUids))
+      );
+    }
+
+    function isStoreSuspendedData(data) {
+      return (
+        (('suspended' in data) && data.suspended == true) ||
+        (('inhabilitada' in data) && data.inhabilitada == true) ||
+        (('activa' in data) && data.activa == false) ||
+        (('status' in data) && (data.status == 'suspended' || data.status == 'disabled'))
+      );
+    }
+
+    function suspendedUnchanged() {
+      let oldSuspended = ('suspended' in resource.data) ? resource.data.suspended : false;
+      let newSuspended = ('suspended' in request.resource.data) ? request.resource.data.suspended : oldSuspended;
+
+      let oldInhabilitada = ('inhabilitada' in resource.data) ? resource.data.inhabilitada : false;
+      let newInhabilitada = ('inhabilitada' in request.resource.data) ? request.resource.data.inhabilitada : oldInhabilitada;
+
+      let oldActiva = ('activa' in resource.data) ? resource.data.activa : true;
+      let newActiva = ('activa' in request.resource.data) ? request.resource.data.activa : oldActiva;
+
+      let oldStatus = ('status' in resource.data) ? resource.data.status : 'trial';
+      let newStatus = ('status' in request.resource.data) ? request.resource.data.status : oldStatus;
+
+      return newSuspended == oldSuspended
+        && newInhabilitada == oldInhabilitada
+        && newActiva == oldActiva
+        && (!(newStatus in ['suspended', 'disabled']) || (oldStatus in ['suspended', 'disabled']));
+    }
+
+    // Perfil de usuarios
+    match /users/{uid} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && (!('role' in request.resource.data) || request.resource.data.role != 'admin' || isAdmin());
+
+      allow update: if isAdmin() || (
+        isSignedIn()
+        && request.auth.uid == uid
+        && (
+          !('role' in request.resource.data) ||
+          (('role' in resource.data) && request.resource.data.role == resource.data.role) ||
+          request.resource.data.role in ['dueno', 'cajero', 'vendedor', 'almacen', 'empleado', 'usuario']
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // Negocios / Cuentas y control de suscripciones (GestorPro + Gestor Pro Control de Cobros)
+    match /stores/{storeId} {
+      allow read: if isAdmin() || isMemberOfStoreData(resource.data);
+
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && (!('suspended' in request.resource.data) || request.resource.data.suspended == false || isAdmin());
+
+      allow update: if isAdmin()
+        || (
+          isMemberOfStoreData(resource.data)
+          && suspendedUnchanged()
+          && request.resource.data.ownerUid == resource.data.ownerUid
+        )
+        || (
+          isSignedIn()
+          && !isStoreSuspendedData(resource.data)
+          && !isMemberOfStoreData(resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberUids', 'equipo', 'updatedAt'])
+          && ('memberUids' in request.resource.data)
+          && (request.auth.uid in request.resource.data.memberUids)
+          && request.resource.data.memberUids.size() <= 10
+        );
+
+      allow delete: if isAdmin() || isOwnerOfStoreData(resource.data);
+
+      // Subcolecciones operativas de cada tienda (si se sincronizan en Firestore)
+      match /{subcol}/{docId} {
+        allow read, write: if isAdmin()
+          || (
+            isMemberOfStoreData(get(/databases/$(database)/documents/stores/$(storeId)).data)
+            && !isStoreSuspendedData(get(/databases/$(database)/documents/stores/$(storeId)).data)
+          );
+      }
+    }
+
+    // Referencias de pago (anti-duplicados)
+    match /payment_references/{refId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.ownerEmail == request.auth.token.email);
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Solicitudes de suscripción
+    match /subscription_requests/{docId} {
+      allow create: if isSignedIn();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // Solicitudes de soporte técnico
+    match /support_requests/{docId} {
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid;
+      allow read, update, delete: if isAdmin();
+    }
+  }
+}
