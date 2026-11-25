@@ -32,6 +32,19 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+// Correos / cuentas exentas de bloqueo automático por vencimiento
+const EXEMPT_EMAILS = ["joelvysalazar@gmail.com"];
+
+function isExemptStore(store) {
+  const email = (store?.ownerEmail || "").trim().toLowerCase();
+  return EXEMPT_EMAILS.includes(email) || store?.exentoCobro === true || store?.nuncaSuspender === true;
+}
+
+function isStoreBlocked(store) {
+  if (isExemptStore(store)) return false;
+  return store?.inhabilitada === true || store?.suspended === true || store?.status === "suspended";
+}
+
 // Colecciones en Firestore
 const STORES_COL = "stores";
 const PAYMENTS_COL = "payment_references";
@@ -105,7 +118,7 @@ onAuthStateChanged(auth, (user) => {
 });
 
 // =========================================================================
-// UTILIDADES DE FECHA (Cobro el mismo día de ingreso cada 1 o 3 meses)
+// UTILIDADES DE FECHA (Soporta ISO "YYYY-MM-DD" y timestamps en ms)
 // =========================================================================
 function toISODate(dateObj) {
   const y = dateObj.getFullYear();
@@ -115,8 +128,16 @@ function toISODate(dateObj) {
 }
 
 function parseISODate(isoStr) {
+  if (!isoStr || typeof isoStr !== "string" || !isoStr.includes("-")) return null;
   const [y, m, d] = isoStr.split("-").map(Number);
+  if (!y || !m || !d) return null;
   return new Date(y, m - 1, d, 0, 0, 0, 0);
+}
+
+function msToDate(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return null;
+  const dt = new Date(ms);
+  return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate(), 0, 0, 0, 0);
 }
 
 function daysInMonth(year, monthIndexZeroBased) {
@@ -135,6 +156,33 @@ function addMonthsKeepingBillingDay(baseDate, billingDay, monthsToAdd = 1) {
   return new Date(targetYear, targetMonth, safeDay, 0, 0, 0, 0);
 }
 
+function getStoreIngresoDate(store) {
+  return parseISODate(store?.fechaIngreso) || msToDate(store?.createdAt);
+}
+
+function getStoreBillingDay(store) {
+  if (typeof store?.diaCobro === "number" && store.diaCobro >= 1 && store.diaCobro <= 31) {
+    return store.diaCobro;
+  }
+  const ing = getStoreIngresoDate(store);
+  return ing ? ing.getDate() : null;
+}
+
+function getStoreDueDate(store) {
+  if (store?.proximoVencimiento === "Nunca") return null;
+  const fromISO = parseISODate(store?.proximoVencimiento);
+  if (fromISO) return fromISO;
+
+  const paidDate = msToDate(store?.paidUntil);
+  const trialDate = msToDate(store?.trialEndsAt);
+  if (paidDate && trialDate) return paidDate > trialDate ? paidDate : trialDate;
+  return paidDate || trialDate || null;
+}
+
+function getStoreName(store) {
+  return store?.nombre || store?.bizName || store?.storeId || store?.id || "-";
+}
+
 // =========================================================================
 // REGISTRAR NUEVO NEGOCIO (1er MES GRATIS)
 // =========================================================================
@@ -146,11 +194,12 @@ document.getElementById("registerStoreForm").addEventListener("submit", async (e
   const storeId = document.getElementById("regStoreId").value.trim();
   const ownerEmail = document.getElementById("regEmail").value.trim().toLowerCase();
   const bizName = document.getElementById("regBizName").value.trim() || storeId;
-  const ingresoDate = parseISODate(document.getElementById("regDate").value);
+  const ingresoDate = parseISODate(document.getElementById("regDate").value) || new Date();
 
   const billingDay = ingresoDate.getDate();
   const nextDueDate = addMonthsKeepingBillingDay(ingresoDate, billingDay, 1);
   const nextDueISO = toISODate(nextDueDate);
+  const exempt = EXEMPT_EMAILS.includes(ownerEmail);
 
   try {
     const storeRef = doc(db, STORES_COL, storeId);
@@ -165,23 +214,28 @@ document.getElementById("registerStoreForm").addEventListener("submit", async (e
     await setDoc(storeRef, {
       storeId,
       ownerEmail,
+      nombre: bizName,
       bizName,
       fechaIngreso: toISODate(ingresoDate),
       diaCobro: billingDay,
-      primerMesGratis: true,
+      primerMesGratis: !exempt,
+      exentoCobro: exempt,
+      nuncaSuspender: exempt,
       trialEndsAt: nextDueDate.getTime(),
-      proximoVencimiento: nextDueISO,
+      proximoVencimiento: exempt ? "Nunca" : nextDueISO,
       paidUntil: nextDueDate.getTime(),
-      status: "trial",
+      status: exempt ? "active" : "trial",
       suspended: false,
       inhabilitada: false,
       activa: true,
       suspensionReason: "",
-      createdAt: Date.now(),
+      createdAt: ingresoDate.getTime(),
       updatedAt: serverTimestamp()
     });
 
-    feedback.textContent = `Negocio "${storeId}" registrado con 1er mes gratis. Próximo cobro: ${nextDueISO} (día ${billingDay} de cada mes).`;
+    feedback.textContent = exempt
+      ? `Negocio "${storeId}" registrado como EXENTO de bloqueo automático.`
+      : `Negocio "${storeId}" registrado con 1er mes gratis. Próximo cobro: ${nextDueISO} (día ${billingDay} de cada mes).`;
     feedback.classList.add("ok");
     e.target.reset();
     document.getElementById("regDate").value = todayISO;
@@ -225,13 +279,15 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
     }
 
     const storeData = storeSnap.data();
-    const billingDay = storeData.diaCobro || parseISODate(storeData.fechaIngreso || todayISO).getDate();
-    const currentDue = storeData.proximoVencimiento ? parseISODate(storeData.proximoVencimiento) : parseISODate(payDateStr);
-    const paymentDateObj = parseISODate(payDateStr);
+    const paymentDateObj = parseISODate(payDateStr) || new Date();
+    const ingresoDateObj = getStoreIngresoDate(storeData) || paymentDateObj;
+    const billingDay = getStoreBillingDay(storeData) || ingresoDateObj.getDate();
+    const fechaIngresoFinal = storeData.fechaIngreso || toISODate(ingresoDateObj);
+    const currentDue = getStoreDueDate(storeData);
 
-    const baseForNext = currentDue > paymentDateObj ? currentDue : paymentDateObj;
+    const baseForNext = (currentDue && currentDue > paymentDateObj) ? currentDue : paymentDateObj;
     const nextDueDate = addMonthsKeepingBillingDay(baseForNext, billingDay, months);
-    const nextDueISO = toISODate(nextDueDate);
+    const nextDueISO = isExemptStore(storeData) ? "Nunca" : toISODate(nextDueDate);
 
     await setDoc(refDocRef, {
       reference,
@@ -245,6 +301,8 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
     });
 
     await updateDoc(storeRef, {
+      fechaIngreso: fechaIngresoFinal,
+      diaCobro: billingDay,
       status: "active",
       suspended: false,
       inhabilitada: false,
@@ -254,12 +312,13 @@ document.getElementById("applyPaymentForm").addEventListener("submit", async (e)
       lastPaymentDate: payDateStr,
       lastPlanMonths: months,
       paidUntil: nextDueDate.getTime(),
+      trialEndsAt: nextDueDate.getTime(),
       proximoVencimiento: nextDueISO,
       updatedAt: serverTimestamp()
     });
 
     const planLabel = months === 3 ? "3 meses" : "1 mes";
-    feedback.textContent = `Pago validado (${planLabel}, Ref: ${reference}). "${storeId}" ACTIVO hasta ${nextDueISO}.`;
+    feedback.textContent = `Pago validado (${planLabel}, Ref: ${reference}). "${storeId}" ACTIVO (Vencimiento: ${nextDueISO}).`;
     feedback.classList.add("ok");
     e.target.reset();
     document.getElementById("payMonths").value = "1";
@@ -280,20 +339,22 @@ async function runAutomaticExpirationCheck() {
   let blockedCount = 0;
 
   for (const store of storesCache) {
-    if (!store.proximoVencimiento) continue;
-    const dueObj = parseISODate(store.proximoVencimiento);
+    if (isExemptStore(store)) continue;
+    if (store?.proximoVencimiento === "Nunca") continue;
+    const dueObj = getStoreDueDate(store);
+    if (!dueObj) continue;
 
     const isDueTodayOrPast = todayObj >= dueObj;
-    const alreadyBlocked = store.inhabilitada === true || store.suspended === true || store.status === "suspended";
+    const alreadyBlocked = isStoreBlocked(store);
 
     if (isDueTodayOrPast && !alreadyBlocked) {
-      const storeRef = doc(db, STORES_COL, store.storeId);
+      const storeRef = doc(db, STORES_COL, store.storeId || store.id);
       await updateDoc(storeRef, {
         status: "suspended",
         suspended: true,
         inhabilitada: true,
         activa: false,
-        suspensionReason: `Vencimiento alcanzado (${store.proximoVencimiento}) sin pago registrado.`,
+        suspensionReason: `Vencimiento alcanzado (${toISODate(dueObj)}) sin pago registrado.`,
         updatedAt: serverTimestamp()
       });
       blockedCount++;
@@ -310,31 +371,42 @@ btnRunAutoCheck.addEventListener("click", async () => {
 });
 
 window.toggleStoreBlock = async function (storeId, shouldBlock) {
-  const storeRef = doc(db, STORES_COL, storeId);
-  if (shouldBlock) {
-    await updateDoc(storeRef, {
-      status: "suspended",
-      suspended: true,
-      inhabilitada: true,
-      activa: false,
-      suspensionReason: "Bloqueado manualmente desde el panel.",
-      updatedAt: serverTimestamp()
-    });
-  } else {
-    const store = storesCache.find((s) => s.storeId === storeId);
-    const billingDay = store?.diaCobro || new Date().getDate();
-    const nextDueDate = addMonthsKeepingBillingDay(new Date(), billingDay, 1);
-    const nextDueISO = toISODate(nextDueDate);
-    await updateDoc(storeRef, {
-      status: "active",
-      suspended: false,
-      inhabilitada: false,
-      activa: true,
-      suspensionReason: "",
-      proximoVencimiento: nextDueISO,
-      paidUntil: nextDueDate.getTime(),
-      updatedAt: serverTimestamp()
-    });
+  const docId = String(storeId);
+  const store = storesCache.find((s) => (s.storeId || s.id) === docId);
+  if (shouldBlock && store && isExemptStore(store)) {
+    alert("Este correo está configurado como exento y no puede bloquearse.");
+    return;
+  }
+
+  const storeRef = doc(db, STORES_COL, docId);
+  try {
+    if (shouldBlock) {
+      await updateDoc(storeRef, {
+        status: "suspended",
+        suspended: true,
+        inhabilitada: true,
+        activa: false,
+        suspensionReason: "Bloqueado manualmente desde el panel.",
+        updatedAt: serverTimestamp()
+      });
+    } else {
+      const billingDay = getStoreBillingDay(store) || new Date().getDate();
+      const nextDueDate = addMonthsKeepingBillingDay(new Date(), billingDay, 1);
+      const nextDueISO = isExemptStore(store) ? "Nunca" : toISODate(nextDueDate);
+      await updateDoc(storeRef, {
+        status: "active",
+        suspended: false,
+        inhabilitada: false,
+        activa: true,
+        suspensionReason: "",
+        proximoVencimiento: nextDueISO,
+        paidUntil: nextDueDate.getTime(),
+        updatedAt: serverTimestamp()
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    alert(`Error al actualizar estado: ${err.message}`);
   }
 };
 
@@ -372,18 +444,21 @@ searchInput.addEventListener("input", renderStatsAndTables);
 function renderStatsAndTables() {
   const query = searchInput.value.trim().toLowerCase();
   const total = storesCache.length;
-  const blocked = storesCache.filter((s) => s.inhabilitada || s.suspended || s.status === "suspended").length;
+  const blocked = storesCache.filter((s) => isStoreBlocked(s)).length;
   const active = total - blocked;
 
   document.getElementById("statTotal").textContent = total;
   document.getElementById("statActive").textContent = active;
   document.getElementById("statBlocked").textContent = blocked;
 
-  const filtered = storesCache.filter((s) =>
-    (s.storeId || "").toLowerCase().includes(query) ||
-    (s.ownerEmail || "").toLowerCase().includes(query) ||
-    (s.bizName || "").toLowerCase().includes(query)
-  );
+  const filtered = storesCache.filter((s) => {
+    const bizLabel = getStoreName(s).toLowerCase();
+    return (
+      (s.storeId || "").toLowerCase().includes(query) ||
+      (s.ownerEmail || "").toLowerCase().includes(query) ||
+      bizLabel.includes(query)
+    );
+  });
 
   if (filtered.length === 0) {
     storesTableBody.innerHTML = `<tr><td colspan="7" class="empty-row">No hay negocios que coincidan.</td></tr>`;
@@ -391,23 +466,41 @@ function renderStatsAndTables() {
   }
 
   storesTableBody.innerHTML = filtered.map((s) => {
-    const isBlocked = s.inhabilitada || s.suspended || s.status === "suspended";
-    const isTrial = !isBlocked && s.status === "trial";
-    const badgeClass = isBlocked ? "badge-bad" : (isTrial ? "badge-trial" : "badge-ok");
-    const statusLabel = isBlocked ? "Bloqueado" : (isTrial ? "Mes gratis (Activo)" : "Activo");
+    const docId = s.storeId || s.id;
+    const exempt = isExemptStore(s);
+    const blocked = isStoreBlocked(s);
+    const isTrial = !blocked && !exempt && s.status === "trial";
+    const badgeClass = blocked ? "badge-bad" : (isTrial ? "badge-trial" : "badge-ok");
+    const statusLabel = exempt
+      ? "Activo (Exento)"
+      : (blocked ? "Bloqueado" : (isTrial ? "Mes gratis (Activo)" : "Activo"));
+
+    const ingresoDateObj = getStoreIngresoDate(s);
+    const billingDay = getStoreBillingDay(s);
+    const ingresoText = ingresoDateObj
+      ? `${toISODate(ingresoDateObj)} (Día ${billingDay || ingresoDateObj.getDate()})`
+      : "-";
+
+    const dueDateObj = getStoreDueDate(s);
+    const dueText = exempt || s.proximoVencimiento === "Nunca"
+      ? "Nunca"
+      : (dueDateObj ? toISODate(dueDateObj) : "-");
 
     return `
       <tr>
-        <td><strong>${escapeHtml(s.storeId || s.id)}</strong></td>
+        <td><strong>${escapeHtml(docId)}</strong></td>
         <td>${escapeHtml(s.ownerEmail || "-")}</td>
-        <td>${escapeHtml(s.bizName || "-")}</td>
-        <td>${escapeHtml(s.fechaIngreso || "-")} (Día ${s.diaCobro || "-"})</td>
-        <td><strong>${escapeHtml(s.proximoVencimiento || "-")}</strong></td>
+        <td>${escapeHtml(getStoreName(s))}</td>
+        <td>${escapeHtml(ingresoText)}</td>
+        <td><strong>${escapeHtml(dueText)}</strong></td>
         <td><span class="badge ${badgeClass}">${statusLabel}</span></td>
         <td class="actions-cell">
-          ${isBlocked
-            ? `<button class="btn btn-success btn-sm" onclick="toggleStoreBlock('${escapeJs(s.storeId || s.id)}', false)">Reactivar</button>`
-            : `<button class="btn btn-danger btn-sm" onclick="toggleStoreBlock('${escapeJs(s.storeId || s.id)}', true)">Bloquear</button>`
+          ${exempt
+            ? `<span class="hint">Protegido</span>`
+            : (blocked
+              ? `<button class="btn btn-success btn-sm" onclick="toggleStoreBlock('${escapeJs(docId)}', false)">Reactivar</button>`
+              : `<button class="btn btn-danger btn-sm" onclick="toggleStoreBlock('${escapeJs(docId)}', true)">Bloquear</button>`
+            )
           }
         </td>
       </tr>
