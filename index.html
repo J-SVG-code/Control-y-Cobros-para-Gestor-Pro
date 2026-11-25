@@ -3,22 +3,44 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gestor Pro — Control de Negocios y Cobros</title>
+  <title>Gestor Pro — Control de Cobros</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div>
       <h1>Gestor Pro · Control de Cobros</h1>
-      <p class="subtitle">1er mes gratis por negocio · Cobro mensual el mismo día de ingreso</p>
+      <p class="subtitle">1er mes gratis por negocio · Planes de 1 o 3 meses · Cobro el mismo día de ingreso</p>
     </div>
     <div class="header-actions">
-      <span id="dbStatus" class="badge badge-warn">Sin conectar a Firebase</span>
-      <button id="btnRunAutoCheck" class="btn btn-secondary">Revisar vencimientos ahora</button>
+      <span id="dbStatus" class="badge badge-warn">Inicia sesión</span>
+      <button id="btnLogout" class="btn btn-secondary btn-sm" style="display:none;">Cerrar sesión</button>
+      <button id="btnRunAutoCheck" class="btn btn-secondary" style="display:none;">Revisar vencimientos ahora</button>
     </div>
   </header>
 
-  <main class="container">
+  <!-- Login de Administrador -->
+  <section id="loginSection" class="container">
+    <div class="card" style="max-width: 440px; margin: 20px auto;">
+      <h2>Acceso de Administrador</h2>
+      <p class="hint">Inicia sesión con tu correo y contraseña de Firebase Auth para gestionar negocios y pagos.</p>
+      <form id="loginForm" class="form-grid">
+        <label class="full-span">
+          Correo de administrador *
+          <input type="email" id="loginEmail" placeholder="tu-correo@ejemplo.com" required />
+        </label>
+        <label class="full-span">
+          Contraseña *
+          <input type="password" id="loginPassword" placeholder="Tu contraseña" required />
+        </label>
+        <button type="submit" class="btn btn-primary full-span">Entrar al panel</button>
+      </form>
+      <div id="loginFeedback" class="feedback" role="status"></div>
+    </div>
+  </section>
+
+  <!-- Panel Principal (visible tras iniciar sesión) -->
+  <main id="panelSection" class="container" style="display:none;">
     <!-- Resumen rápido -->
     <section class="stats-grid">
       <div class="stat-card">
@@ -69,7 +91,7 @@
       <!-- Validar y aplicar pago por ID + Referencia -->
       <section class="card">
         <h2>2. Aplicar pago (ID + Referencia)</h2>
-        <p class="hint">Pega el ID del negocio y el código de referencia. Bloquea referencias duplicadas y extiende 1 mes.</p>
+        <p class="hint">Pega el ID del negocio, elige el plan (1 o 3 meses) y pon la referencia sin repetir.</p>
         <form id="applyPaymentForm" class="form-grid">
           <label>
             ID del negocio (`storeId`) *
@@ -80,14 +102,21 @@
             <input type="text" id="payRef" placeholder="Ej: 0048192034" required />
           </label>
           <label>
-            Monto (opcional)
-            <input type="text" id="payAmount" placeholder="Ej: $6 / 250 Bs" />
+            Plan a aplicar *
+            <select id="payMonths" required style="background:#0b1220;color:#f8fafc;border:1px solid #334155;border-radius:8px;padding:10px 12px;font-size:0.92rem;">
+              <option value="1" selected>1 mes</option>
+              <option value="3">3 meses</option>
+            </select>
           </label>
           <label>
+            Monto (opcional)
+            <input type="text" id="payAmount" placeholder="Ej: $6 (1m) / $15 (3m)" />
+          </label>
+          <label class="full-span">
             Fecha de pago
             <input type="date" id="payDate" required />
           </label>
-          <button type="submit" class="btn btn-success full-span">Validar referencia y activar 1 mes</button>
+          <button type="submit" class="btn btn-success full-span">Validar referencia y activar plan</button>
         </form>
         <div id="paymentFeedback" class="feedback" role="status"></div>
       </section>
@@ -128,9 +157,9 @@
             <tr>
               <th>Referencia</th>
               <th>ID Negocio</th>
-              <th>Monto</th>
+              <th>Plan / Monto</th>
               <th>Fecha pago</th>
-              <th>Registrado en sistema</th>
+              <th>Próximo vencimiento</th>
             </tr>
           </thead>
           <tbody id="refsTableBody">
