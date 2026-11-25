@@ -20,7 +20,7 @@ import {
 // 1. CONFIGURACIÓN DE TU PROYECTO DE FIREBASE
 // =========================================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyAtFXiNb7dLgb2KAfDmqV3NZ-nLSewNgo",
+  apiKey: "AIzaSyAtFPX1nB7dLgbQWAHBnqv3N2-hL5eWHgo",
   authDomain: "gestor-pro-venezuela.firebaseapp.com",
   projectId: "gestor-pro-venezuela",
   storageBucket: "gestor-pro-venezuela.firebasestorage.app",
